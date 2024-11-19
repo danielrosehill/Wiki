@@ -1,6 +1,7 @@
 ---
 title: "Dirty flags for submodules"
-og_title: "Dirty flags to prevent Github 
+og_title: "Dirty flags to prevent Github Catastrophes"
+og_image: "https://docs.bydanielrosehill.com/repos/wiki/images/horrified-cat.webp"
 ---
 
 # Adding 'dirty' flags to prevent Github submodule conflict hell
