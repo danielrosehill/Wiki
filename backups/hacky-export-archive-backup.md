@@ -49,3 +49,182 @@ This gets you a `.zip`:
 Inside of this are individual files:
 
  ![alt text](../images/saas_export/files.png)
+
+ ## Script for incremental sync to cloud
+
+ My approach is to (weekly):
+
+ 1) Pull down a zip export  
+ 2) Incrementally sync it to cloud storage (while keeping a local copy)  
+
+## Copy (only) new files to local
+
+This one is basic but easy. While I tried creating more elaborate scripts that would firstly extract the zip into a temporary folder and then compare with the files in the local and then incrementally sync those using `rsync`, ultimately the GUI (Dolphin) does this so well that there's simply no major advantage.
+
+Just export the export archive into the folder where you're keeping a local copy of the backup, and select `skip` and `apply to all` to tell the GUI to skip the files that already exist.
+
+![alt text](../images/saas_export/diff-finder.png)
+
+You could script this part of the proccess too:
+
+Let's say that I decide that I'll put the Zip exports in:
+
+`/home/daniel/Cloud_Remotes/nuclino-zips`
+
+And I'll keep a local copy of my notes in:
+
+`/home/daniel/Cloud_Remotes/Nuclino_Backups`
+
+I could add this script to my system at autostart it at boot:
+
+```python
+import os
+import zipfile
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+
+# Define source and destination directories
+SOURCE_DIR = "/home/daniel/Cloud_Remotes/nuclino-zips"
+DEST_DIR = "/home/daniel/Cloud_Remotes/Nuclino_Backups"
+
+class ZipFileHandler(FileSystemEventHandler):
+    def on_created(self, event):
+        # Check if the created file is a zip file
+        if event.is_directory or not event.src_path.endswith(".zip"):
+            return
+        
+        zip_path = event.src_path
+        print(f"New zip file detected: {zip_path}")
+        
+        # Extract the zip file
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                for file in zip_ref.namelist():
+                    dest_file_path = os.path.join(DEST_DIR, file)
+                    # Skip extraction if the file already exists
+                    if os.path.exists(dest_file_path):
+                        print(f"Skipping existing file: {dest_file_path}")
+                        continue
+                    
+                    # Ensure destination directories exist
+                    os.makedirs(os.path.dirname(dest_file_path), exist_ok=True)
+                    
+                    # Extract the file
+                    print(f"Extracting: {file} to {dest_file_path}")
+                    zip_ref.extract(file, DEST_DIR)
+            
+            print(f"Extraction completed for: {zip_path}")
+        
+        except Exception as e:
+            print(f"Error processing {zip_path}: {e}")
+
+if __name__ == "__main__":
+    # Set up the observer to monitor the source directory
+    event_handler = ZipFileHandler()
+    observer = Observer()
+    observer.schedule(event_handler, path=SOURCE_DIR, recursive=False)
+    
+    print(f"Monitoring directory: {SOURCE_DIR} for new zip files...")
+    
+    try:
+        observer.start()
+        while True:
+            pass  # Keep the script running
+    except KeyboardInterrupt:
+        observer.stop()
+    
+    observer.join()
+```    
+
+## Copy new files, then sync those (incrementally) to B2
+
+You could chain the first and following steps so that the system will:
+
+1 - Watch for new zips  
+2 - When new zips are detected, move in the new files (only), and then:  
+3 - Trigger the GUI to sync those new files up to B2  
+
+Which is as follows:
+
+## GUI for incremental syncing to B2 remote
+
+```bash
+
+#!/bin/bash
+
+# Define the source and destination paths
+LOCAL="/home/daniel/backups/my-notes"
+REMOTE="b2:mybucket"
+
+# Function to check if local directory is empty
+check_local_dir() {
+    if [ -z "$(ls -A $LOCAL 2>/dev/null)" ]; then
+        # Directory is empty or doesn't exist, use copy from remote
+        echo "# Local directory is empty, downloading from B2..."
+        return 0
+    else
+        # Directory has content, use sync
+        echo "# Local directory has content, performing sync..."
+        return 1
+    fi
+}
+
+# Function to perform the operation
+do_sync() {
+    # Create a temporary file for logging
+    LOGFILE=$(mktemp)
+    
+    # Launch terminal window for verbose output
+    xterm -geometry 100x30 -T "Transfer Progress - Detailed Log" -e "tail -f $LOGFILE" &
+    XTERM_PID=$!
+
+    {
+        if check_local_dir; then
+            # Copy from remote if local is empty
+            rclone copy -vv --progress --stats 1s --stats-one-line \
+                --verbose --transfers 4 --checkers 8 \
+                "$REMOTE" "$LOCAL" 2>&1 | tee -a "$LOGFILE"
+        else
+            # Sync if local has content
+            rclone sync -vv --progress --stats 1s --stats-one-line \
+                --verbose --transfers 4 --checkers 8 \
+                "$LOCAL" "$REMOTE" 2>&1 | tee -a "$LOGFILE"
+        fi | \
+        while IFS= read -r line; do
+            # Extract progress percentage for the progress bar
+            if [[ $line =~ ([0-9]+)% ]]; then
+                echo "${BASH_REMATCH[1]}"
+            fi
+            # Send current operation to dialog
+            echo "# $line"
+        done
+    } | zenity --progress \
+        --title="B2 Transfer Progress" \
+        --text="Starting operation..." \
+        --percentage=0 \
+        --auto-close \
+        --width=500
+
+    # Clean up
+    kill $XTERM_PID
+    rm -f "$LOGFILE"
+}
+
+# Main GUI dialog
+if zenity --question \
+    --title="B2 Transfer" \
+    --text="Start transfer operation?" \
+    --ok-label="Start" \
+    --cancel-label="Cancel" \
+    --width=300; then
+    
+    # Run operation
+    do_sync
+
+    # Show completion dialog
+    zenity --info \
+        --title="Transfer Complete" \
+        --text="Operation has finished successfully." \
+        --width=300
+fi
+```
